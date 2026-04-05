@@ -1,45 +1,58 @@
-# Guided Reading (skeleton)
+# Guided Reading AI
 
-Monorepo: Next.js frontend, FastAPI backend, Dockerfiles under `docker/`.
+Production-oriented monorepo for a **real-time guided reading assistant** (children’s reading): Next.js UI, FastAPI + WebSockets, optional Redis, CPU-friendly inference hooks.
+
+## Architecture
+
+| Track | Role | Implementation |
+|--------|------|----------------|
+| **Live** | UI highlighting, low latency | `CpuLiveTrack` + matcher (swap for **Sherpa-ONNX** streaming Zipformer + **Silero VAD**) |
+| **Judge** | Post-session evaluation | `evaluation.run_faster_whisper_judge` (install **faster-whisper** + `base.en`) |
+| **State** | Pointers / event log | `SessionController` **high-water mark** + Redis or in-memory `SessionStore` |
+
+**Story hierarchy:** Paragraph → Sentence → Chunk → Word (`schemas/story.schema.json`, `backend/data/story.json`).
+
+**Session end JSON:** `WRONG_WORDS`, `SKIPPED_WORDS`, `EXTRA_WORDS`, `REPEATED_WORDS`, plus `CHUNK_SCORES`, `WCPM`, `JUDGE_TRACK` — see `POST /sessions/{id}/end`.
 
 ## Run locally
 
-**Backend** (from repo root):
+**Redis (optional):** `docker run -p 6379:6379 redis:7-alpine` then `set REDIS_URL=redis://127.0.0.1:6379/0`.
+
+**Backend** (from `backend/`):
 
 ```bash
-cd backend
 python -m pip install -r requirements.txt
-python -m uvicorn main:app --reload --host 127.0.0.1 --port 8000
+python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-**Frontend**:
+**Frontend** (`frontend/`):
 
 ```bash
-cd frontend
 npm install
 npm run dev
 ```
 
-Copy `frontend/.env.example` to `frontend/.env.local` if you need a custom WebSocket URL (`NEXT_PUBLIC_WS_URL`).
+Set `NEXT_PUBLIC_API_URL` (see `frontend/.env.example`). WebSocket path: `/ws/read/{session_id}` after `POST /sessions`.
 
-## Docker
-
-Build from the repository root:
+## Docker Compose (API + Redis)
 
 ```bash
-docker build -f docker/Dockerfile.backend -t guided-reading-backend .
-docker build -f docker/Dockerfile.frontend -t guided-reading-frontend .
+docker compose up --build
 ```
 
-## Data model
-
-See `schemas/story.schema.json` and `frontend/data/story.json`.
-
-## Publish to GitHub
-
-Create an empty repository `guided-reading-skeleton` under the `TeamFreelanceML` organization (or run `gh repo create TeamFreelanceML/guided-reading-skeleton --private --source=. --remote=origin --push` if you use the GitHub CLI). Then from this folder:
+## CI / CPU Docker image
 
 ```bash
-git remote add origin https://github.com/TeamFreelanceML/guided-reading-skeleton.git   # skip if already added
+docker build -f docker/Dockerfile.backend -t guided-reading-api .
+```
+
+Add ONNX / Whisper layers in a derived image for Cloud Run.
+
+## Publish to GitHub (TeamFreelanceML)
+
+Target repo: **`guided-reading-ai`**.
+
+```bash
+git remote add origin https://github.com/TeamFreelanceML/guided-reading-ai.git
 git push -u origin main
 ```

@@ -1,0 +1,37 @@
+{
+  "title": "The Little Lighthouse",
+  "paragraphs": [
+    {
+      "sentences": [
+        {
+          "chunks": [
+            { "words": ["The", "morning", "sun"] },
+            { "words": ["painted", "the", "waves", "gold."] }
+          ]
+        },
+        {
+          "chunks": [
+            { "words": ["A", "single", "gull"] },
+            { "words": ["circled", "above", "the", "bluff."] }
+          ]
+        }
+      ]
+    },
+    {
+      "sentences": [
+        {
+          "chunks": [
+            { "words": ["Inside", "the", "lighthouse,"] },
+            { "words": ["the", "keeper", "checked", "her", "log."] }
+          ]
+        },
+        {
+          "chunks": [
+            { "words": ["Somewhere", "far", "out", "at", "sea,"] },
+            { "words": ["a", "ship", "was", "coming", "home."] }
+          ]
+        }
+      ]
+    }
+  ]
+}

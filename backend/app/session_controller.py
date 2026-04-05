@@ -1,0 +1,186 @@
+from __future__ import annotations
+
+import time
+from dataclasses import dataclass, field
+from typing import Any
+
+from .config import LONG_PAUSE_SEC, PHONETIC_THRESHOLD
+from .story_hierarchy import ChunkRef
+from .matcher import is_word_match, phonetic_similarity
+from .story_hierarchy import WordRef, compare_pointer_forward, pointer_tuple
+
+from .live_engine import CpuLiveTrack
+
+
+@dataclass
+class SessionController:
+    session_id: str
+    words: list[WordRef]
+    chunks: list[ChunkRef]
+    store: Any
+    last_matched_global: int = -1
+    attempts_on_target: int = 0
+    last_chunk_boundary_monotonic: float = field(default_factory=time.monotonic)
+    no_pause_between_chunks: bool = False
+    max_silence_inside_chunk_ms: float = 0.0
+    chunk_flags: dict[int, dict[str, bool]] = field(default_factory=dict)
+    session_start_monotonic: float = field(default_factory=time.monotonic)
+    long_pause_seconds_accumulated: float = 0.0
+    _last_silence_start: float | None = None
+
+    def expected_word(self) -> WordRef | None:
+        nxt = self.last_matched_global + 1
+        if nxt >= len(self.words):
+            return None
+        return self.words[nxt]
+
+    def hwm_tuple(self) -> tuple[int, int, int, int]:
+        if self.last_matched_global < 0:
+            return (-1, -1, -1, -1)
+        w = self.words[self.last_matched_global]
+        return pointer_tuple(w)
+
+    def on_audio_tick(self, db: float, engine: CpuLiveTrack) -> list[dict]:
+        out: list[dict] = []
+        now = time.monotonic()
+        expected = self.expected_word()
+        if expected is None:
+            return [{"type": "session_complete", "last_matched_global": self.last_matched_global}]
+
+        # Long pause accounting (evaluation): silence streaks > LONG_PAUSE_SEC
+        if db < engine.voice_db_threshold:
+            if self._last_silence_start is None:
+                self._last_silence_start = now
+        else:
+            if self._last_silence_start is not None:
+                dur = now - self._last_silence_start
+                if dur > LONG_PAUSE_SEC:
+                    self.long_pause_seconds_accumulated += dur - LONG_PAUSE_SEC
+                self._last_silence_start = None
+
+        if engine._silence_run_ms > 50:
+            self.max_silence_inside_chunk_ms = max(
+                self.max_silence_inside_chunk_ms,
+                engine._silence_run_ms,
+            )
+
+        hyp = engine.hypothesis_for_speech(expected.text)
+        if hyp:
+            matched_chars = min(len(expected.text), max(0, len(hyp)))
+            out.append(
+                {
+                    "type": "word_char_progress",
+                    "global_word_index": expected.global_word_index,
+                    "matched_chars": matched_chars,
+                    "expected_word": expected.text,
+                }
+            )
+
+        if not hyp:
+            return out
+
+        score = phonetic_similarity(expected.text, hyp)
+        if is_word_match(expected.text, hyp, PHONETIC_THRESHOLD):
+            self.attempts_on_target = 0
+            cand = pointer_tuple(expected)
+            prev_t = self.hwm_tuple()
+            if prev_t == (-1, -1, -1, -1) or compare_pointer_forward(prev_t, cand):
+                prev_g = self.last_matched_global
+                self._update_chunk_metrics(prev_g, expected, now)
+                self.last_matched_global = expected.global_word_index
+                out.append(
+                    {
+                        "type": "word_matched",
+                        "paragraph_idx": expected.paragraph_idx,
+                        "sentence_idx": expected.sentence_idx,
+                        "chunk_idx": expected.chunk_idx,
+                        "word_in_chunk": expected.word_in_chunk,
+                        "global_word_index": expected.global_word_index,
+                        "flat_sentence_index": expected.flat_sentence_index,
+                        "expected_word": expected.text,
+                        "score": round(score, 4),
+                    }
+                )
+        else:
+            self.attempts_on_target += 1
+            if 0.2 < score < PHONETIC_THRESHOLD:
+                out.append(
+                    {
+                        "type": "mispronounce",
+                        "global_word_index": expected.global_word_index,
+                        "expected_word": expected.text,
+                        "heard": hyp,
+                        "score": round(score, 4),
+                    }
+                )
+            if self.attempts_on_target >= 2:
+                out.append(
+                    {
+                        "type": "repeat_attempt",
+                        "global_word_index": expected.global_word_index,
+                        "attempts": self.attempts_on_target,
+                    }
+                )
+
+        return out
+
+    def _update_chunk_metrics(self, prev_global: int, w: WordRef, now: float) -> None:
+        if prev_global < 0:
+            self.last_chunk_boundary_monotonic = now
+            return
+        prev_w = self.words[prev_global]
+        same_chunk = (
+            prev_w.paragraph_idx == w.paragraph_idx
+            and prev_w.sentence_idx == w.sentence_idx
+            and prev_w.chunk_idx == w.chunk_idx
+        )
+        if not same_chunk:
+            gap = now - self.last_chunk_boundary_monotonic
+            if gap < 0.05:
+                self.no_pause_between_chunks = True
+            self.last_chunk_boundary_monotonic = now
+            self.max_silence_inside_chunk_ms = 0.0
+
+    async def handle_assist_skip(self, reason: str) -> dict:
+        expected = self.expected_word()
+        if expected is None:
+            return {"type": "assist_ack", "skipped": False}
+        gid = expected.global_word_index
+        ck = self._chunk_global_index_for_word(expected)
+        self.chunk_flags.setdefault(ck, {})["skip"] = True
+        await self.store.rpush_json(
+            self.session_id,
+            "eventlog",
+            {
+                "kind": "SKIPPED_ASSIST",
+                "reason": reason,
+                "global_word_index": gid,
+                "hierarchy": {
+                    "p": expected.paragraph_idx,
+                    "s": expected.sentence_idx,
+                    "c": expected.chunk_idx,
+                    "w": expected.word_in_chunk,
+                },
+            },
+        )
+        prev_t = self.hwm_tuple()
+        cand = pointer_tuple(expected)
+        if prev_t == (-1, -1, -1, -1) or compare_pointer_forward(prev_t, cand):
+            self.last_matched_global = gid
+        self.attempts_on_target = 0
+        return {
+            "type": "assist_ack",
+            "skipped": True,
+            "global_word_index": gid,
+            "tts_url": "/static/tts/voice_1_bm_lewis/assist.wav",
+        }
+
+    def _chunk_global_index_for_word(self, w: WordRef) -> int:
+        for c in self.chunks:
+            if (
+                c.paragraph_idx == w.paragraph_idx
+                and c.sentence_idx == w.sentence_idx
+                and c.chunk_idx == w.chunk_idx
+            ):
+                return c.global_chunk_index
+        return -1

@@ -1,126 +1,25 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
-import storyData from "@/data/story.json";
-import type { Story } from "@/types/story";
-import { flattenSentences } from "@/lib/story";
+import { useReading } from "@/context/ReadingProvider";
 import { ReadingView } from "@/components/ReadingView";
-
-const story = storyData as Story;
-
-function floatTo16BitPCM(input: Float32Array): ArrayBuffer {
-  const out = new Int16Array(input.length);
-  for (let i = 0; i < input.length; i++) {
-    const s = Math.max(-1, Math.min(1, input[i]));
-    out[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
-  }
-  return out.buffer.slice(out.byteOffset, out.byteOffset + out.byteLength);
-}
-
-function wsUrlForSession(sessionId: string): string {
-  const base =
-    process.env.NEXT_PUBLIC_WS_URL?.replace(/\/$/, "") ??
-    "ws://127.0.0.1:8000";
-  return `${base}/ws/stream/${sessionId}`;
-}
-
-function newSessionId(): string {
-  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
-    return crypto.randomUUID();
-  }
-  return `session-${Math.random().toString(36).slice(2)}`;
-}
+import { SessionModals } from "@/components/SessionModals";
 
 export function ReadingSession() {
-  const [sessionId] = useState(newSessionId);
-  const [activeSentenceIndex, setActiveSentenceIndex] = useState(0);
-  const sentenceCount = flattenSentences(story).length;
-  const [isReading, setIsReading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const {
+    story,
+    sessionId,
+    isReading,
+    error,
+    evaluation,
+    startReading,
+    stopReading,
+    requestSessionEnd,
+  } = useReading();
 
-  const wsRef = useRef<WebSocket | null>(null);
-  const cleanupRef = useRef<(() => void) | null>(null);
-
-  const stopReading = useCallback(() => {
-    cleanupRef.current?.();
-    cleanupRef.current = null;
-    if (wsRef.current) {
-      wsRef.current.close();
-      wsRef.current = null;
-    }
-    setIsReading(false);
-  }, []);
-
-  const startReading = useCallback(async () => {
-    setError(null);
+  const handleStop = async () => {
     stopReading();
-
-    let stream: MediaStream;
-    try {
-      stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          channelCount: 1,
-          echoCancellation: true,
-          noiseSuppression: true,
-          sampleRate: 16_000,
-        },
-      });
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Microphone access failed");
-      return;
-    }
-
-    const ws = new WebSocket(wsUrlForSession(sessionId));
-    ws.binaryType = "arraybuffer";
-    wsRef.current = ws;
-
-    try {
-      await new Promise<void>((resolve, reject) => {
-        ws.onopen = () => resolve();
-        ws.onerror = () => reject(new Error("WebSocket connection failed"));
-      });
-    } catch (e) {
-      stream.getTracks().forEach((t) => t.stop());
-      ws.close();
-      wsRef.current = null;
-      setError(e instanceof Error ? e.message : "WebSocket error");
-      return;
-    }
-
-    const audioContext = new AudioContext({ sampleRate: 16_000 });
-    const source = audioContext.createMediaStreamSource(stream);
-
-    const gain = audioContext.createGain();
-    gain.gain.value = 0;
-
-    // ScriptProcessor is widely supported; swap for AudioWorklet when we need lower latency.
-    const processor = audioContext.createScriptProcessor(4096, 1, 1);
-    processor.onaudioprocess = (ev) => {
-      const input = ev.inputBuffer.getChannelData(0);
-      const pcm = floatTo16BitPCM(input);
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(pcm);
-      }
-    };
-
-    source.connect(processor);
-    processor.connect(gain);
-    gain.connect(audioContext.destination);
-
-    cleanupRef.current = () => {
-      processor.disconnect();
-      gain.disconnect();
-      source.disconnect();
-      stream.getTracks().forEach((t) => t.stop());
-      void audioContext.close();
-    };
-
-    setIsReading(true);
-  }, [sessionId, stopReading]);
-
-  useEffect(() => {
-    return () => stopReading();
-  }, [stopReading]);
+    await requestSessionEnd("user_stop");
+  };
 
   return (
     <div className="flex w-full flex-col gap-8 px-4 py-10">
@@ -130,13 +29,19 @@ export function ReadingSession() {
             {story.title ?? "Guided reading"}
           </h1>
           <p className="text-sm text-zinc-500 dark:text-zinc-400">
-            Session: <code className="text-xs">{sessionId}</code>
+            Session:{" "}
+            <code className="text-xs">{sessionId ?? "— create with Start"}</code>
+          </p>
+          <p className="mt-1 max-w-xl text-xs text-zinc-500 dark:text-zinc-400">
+            Live track: CPU-friendly stub (Sherpa-ONNX + Silero VAD ready).
+            Post-session judge: Faster-Whisper hook. Watchdog: 6s / 12s assist,
+            18s / 36s prompts, 42s evaluation.
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
           <button
             type="button"
-            onClick={startReading}
+            onClick={() => void startReading()}
             disabled={isReading}
             className="rounded-lg bg-zinc-900 px-4 py-2 text-sm font-medium text-white shadow hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-white"
           >
@@ -144,34 +49,12 @@ export function ReadingSession() {
           </button>
           <button
             type="button"
-            onClick={stopReading}
+            onClick={() => void handleStop()}
             disabled={!isReading}
             className="rounded-lg border border-zinc-300 px-4 py-2 text-sm font-medium text-zinc-800 hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-600 dark:text-zinc-200 dark:hover:bg-zinc-800"
           >
             Stop
           </button>
-          <div className="flex gap-2">
-            <button
-              type="button"
-              className="rounded-lg border border-zinc-300 px-3 py-2 text-sm dark:border-zinc-600"
-              onClick={() =>
-                setActiveSentenceIndex((i) => Math.max(0, i - 1))
-              }
-            >
-              Prev sentence
-            </button>
-            <button
-              type="button"
-              className="rounded-lg border border-zinc-300 px-3 py-2 text-sm dark:border-zinc-600"
-              onClick={() =>
-                setActiveSentenceIndex((i) =>
-                  Math.min(sentenceCount - 1, i + 1),
-                )
-              }
-            >
-              Next sentence
-            </button>
-          </div>
         </div>
       </header>
 
@@ -181,10 +64,20 @@ export function ReadingSession() {
         </p>
       ) : null}
 
-      <ReadingView
-        story={story}
-        active_sentence_index={activeSentenceIndex}
-      />
+      <ReadingView />
+
+      {evaluation ? (
+        <section className="mx-auto max-w-2xl rounded-xl border border-zinc-200 bg-white p-4 text-sm shadow-sm dark:border-zinc-700 dark:bg-zinc-900">
+          <h2 className="font-semibold text-zinc-900 dark:text-zinc-50">
+            Session evaluation (4 JSON bundles)
+          </h2>
+          <pre className="mt-2 max-h-96 overflow-auto text-xs text-zinc-700 dark:text-zinc-300">
+            {JSON.stringify(evaluation, null, 2)}
+          </pre>
+        </section>
+      ) : null}
+
+      <SessionModals />
     </div>
   );
 }

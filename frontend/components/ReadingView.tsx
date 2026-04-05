@@ -1,37 +1,49 @@
 "use client";
 
-import type { Story } from "@/types/story";
+import { useEffect, useMemo } from "react";
+import { useReading, useReadingProgressHelpers, useTargetSentenceIndex } from "@/context/ReadingProvider";
 import { flattenSentences, wordsInSentence } from "@/lib/story";
 import { WordDisplay } from "@/components/WordDisplay";
 
-type ReadingViewProps = {
-  story: Story;
-  active_sentence_index: number;
-};
+export function ReadingView() {
+  const { story, lastMatchedGlobal } = useReading();
+  const targetSentenceIndex = useTargetSentenceIndex();
+  const { matchedLengthForWord } = useReadingProgressHelpers();
 
-export function ReadingView({
-  story,
-  active_sentence_index,
-}: ReadingViewProps) {
-  const flat = flattenSentences(story);
+  const blocks = useMemo(() => {
+    const flat = flattenSentences(story);
+    let g = 0;
+    return flat.map((item) => ({
+      key: `${item.paragraphIdx}-${item.sentenceIdx}`,
+      words: wordsInSentence(item.sentence).map((text) => ({
+        text,
+        g: g++,
+      })),
+    }));
+  }, [story]);
+
+  useEffect(() => {
+    const el = document.getElementById(`gr-sentence-${targetSentenceIndex}`);
+    el?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, [targetSentenceIndex, lastMatchedGlobal]);
 
   return (
     <article className="mx-auto max-w-2xl space-y-6 text-lg leading-relaxed text-zinc-900 dark:text-zinc-100">
-      {flat.map((item, index) => {
-        const isActive = index === active_sentence_index;
-        const words = wordsInSentence(item.sentence);
+      {blocks.map(({ key, words }, blockIndex) => {
+        let visual = "blur-md opacity-30 transition-all duration-700";
+        if (blockIndex < targetSentenceIndex) {
+          visual = "opacity-50 transition-all duration-700";
+        } else if (blockIndex === targetSentenceIndex) {
+          visual = "opacity-100 transition-all duration-700";
+        }
         return (
-          <p
-            key={`${item.paragraphIdx}-${item.sentenceIdx}`}
-            className={
-              isActive
-                ? "opacity-100 transition-[filter,opacity] duration-300"
-                : "blur-sm opacity-50 transition-[filter,opacity] duration-300"
-            }
-          >
-            {words.map((w, wi) => (
-              <span key={wi} className="mr-1 inline">
-                <WordDisplay word={w} highlight_percentage={0} />
+          <p key={key} id={`gr-sentence-${blockIndex}`} className={visual}>
+            {words.map(({ text, g }) => (
+              <span key={g} className="mr-1 inline">
+                <WordDisplay
+                  word={text}
+                  matchedCharCount={matchedLengthForWord(g, text)}
+                />
               </span>
             ))}
           </p>

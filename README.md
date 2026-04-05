@@ -34,3 +34,12 @@ docker build -f docker/Dockerfile.frontend -t guided-reading-frontend .
 ## Data model
 
 See `schemas/story.schema.json` and `frontend/data/story.json`.
+
+## Publish to GitHub
+
+Create an empty repository `guided-reading-skeleton` under the `TeamFreelanceML` organization (or run `gh repo create TeamFreelanceML/guided-reading-skeleton --private --source=. --remote=origin --push` if you use the GitHub CLI). Then from this folder:
+
+```bash
+git remote add origin https://github.com/TeamFreelanceML/guided-reading-skeleton.git   # skip if already added
+git push -u origin main
+```

@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from typing import Any
+from difflib import SequenceMatcher
 
 from .config import LONG_PAUSE_SEC, PHONETIC_THRESHOLD, VAD_THRESHOLD_DB
 from .matcher import is_word_match, phonetic_similarity, normalize_token
@@ -24,6 +25,47 @@ def _prefix_match_length(expected: str, spoken: str) -> int:
     return matched
 
 
+def _align_buffer_to_chunk(stt_buffer: list[str], chunk_words: list[str]) -> dict[int, str]:
+    """
+    Use SequenceMatcher to align STT buffer to chunk words.
+    Returns dict[word_in_chunk_idx] = status ('correct', 'skipped', 'wrong', or empty).
+    """
+    if not stt_buffer or not chunk_words:
+        return {}
+
+    normalized_stt = [normalize_token(w) for w in stt_buffer]
+    normalized_chunk = [normalize_token(w) for w in chunk_words]
+
+    matcher = SequenceMatcher(None, normalized_chunk, normalized_stt)
+    matching_blocks = matcher.get_matching_blocks()
+
+    word_status: dict[int, str] = {}
+    matched_indices = set()
+
+    for block in matching_blocks:
+        for i in range(block.size):
+            chunk_idx = block.a + i
+            matched_indices.add(chunk_idx)
+
+    intervening_indices = set()
+    sorted_matched = sorted(matched_indices)
+    for i in range(len(sorted_matched) - 1):
+        current = sorted_matched[i]
+        next_idx = sorted_matched[i + 1]
+        for interv in range(current + 1, next_idx):
+            intervening_indices.add(interv)
+
+    for chunk_idx in matched_indices:
+        word_status[chunk_idx] = "correct"
+
+    for chunk_idx in intervening_indices:
+        if chunk_idx not in word_status:
+            word_status[chunk_idx] = "skipped"
+
+    return word_status
+
+
+
 @dataclass
 class SessionController:
     session_id: str
@@ -41,6 +83,8 @@ class SessionController:
     _last_silence_start: float | None = None
     _chunk_boundary_cleared: bool = True
     _last_mispronounce_hyp: str = ""
+    _current_chunk_idx: int = -1
+    _chunk_word_status: dict[int, str] = field(default_factory=dict)
 
     def expected_word(self) -> WordRef | None:
         nxt = self.last_matched_global + 1
@@ -48,11 +92,102 @@ class SessionController:
             return None
         return self.words[nxt]
 
+    def get_current_chunk_words(self) -> list[str] | None:
+        """Get the words in the current chunk starting from last_matched_global."""
+        expected = self.expected_word()
+        if expected is None:
+            return None
+        p_idx = expected.paragraph_idx
+        s_idx = expected.sentence_idx
+        c_idx = expected.chunk_idx
+        chunk_words = []
+        for word in self.words:
+            if (word.paragraph_idx == p_idx and 
+                word.sentence_idx == s_idx and 
+                word.chunk_idx == c_idx):
+                chunk_words.append(word.text)
+        return chunk_words if chunk_words else None
+
     def hwm_tuple(self) -> tuple[int, int, int, int]:
         if self.last_matched_global < 0:
             return (-1, -1, -1, -1)
         w = self.words[self.last_matched_global]
         return pointer_tuple(w)
+
+    def process_chunk_alignment(self, now: float, engine: CpuLiveTrack) -> list[dict]:
+        """Perform chunk-level alignment using the STT buffer."""
+        out: list[dict] = []
+        
+        chunk_words = self.get_current_chunk_words()
+        if not chunk_words:
+            return out
+        
+        stt_phrase = engine.get_stt_buffer_phrase()
+        if not stt_phrase:
+            return out
+        
+        stt_buffer = stt_phrase.split()
+        word_status = _align_buffer_to_chunk(stt_buffer, chunk_words)
+        
+        if not word_status:
+            return out
+        
+        expected = self.expected_word()
+        if expected is None:
+            return out
+        
+        p_idx = expected.paragraph_idx
+        s_idx = expected.sentence_idx
+        c_idx = expected.chunk_idx
+        
+        matched_words: list[dict] = []
+        skipped_count = 0
+        
+        for word_in_chunk_idx, status in sorted(word_status.items()):
+            for word in self.words:
+                if (word.paragraph_idx == p_idx and 
+                    word.sentence_idx == s_idx and 
+                    word.chunk_idx == c_idx and 
+                    word.word_in_chunk == word_in_chunk_idx):
+                    
+                    if status == "correct":
+                        self.last_matched_global = word.global_word_index
+                        matched_words.append(
+                            {
+                                "type": "word_matched",
+                                "paragraph_idx": word.paragraph_idx,
+                                "sentence_idx": word.sentence_idx,
+                                "chunk_idx": word.chunk_idx,
+                                "word_in_chunk": word.word_in_chunk,
+                                "global_word_index": word.global_word_index,
+                                "flat_sentence_index": word.flat_sentence_index,
+                                "expected_word": word.text,
+                                "score": 0.95,
+                            }
+                        )
+                    elif status == "skipped":
+                        skipped_count += 1
+                    break
+        
+        out.extend(matched_words)
+        
+        if skipped_count > 0:
+            out.append({
+                "type": "skipped_words",
+                "count": skipped_count,
+            })
+        
+        processed_pct = len(word_status) / len(chunk_words) if chunk_words else 0
+        if processed_pct >= 0.70:
+            self._current_chunk_idx = c_idx
+            engine.clear_stt_buffer()
+            out.append({
+                "type": "chunk_advance",
+                "chunk_idx": c_idx,
+            })
+        
+        return out
+
 
     def on_audio_tick(self, db: float, engine: CpuLiveTrack) -> list[dict]:
         out: list[dict] = []
@@ -72,20 +207,14 @@ class SessionController:
                     self.long_pause_seconds_accumulated += dur - LONG_PAUSE_SEC
                 self._last_silence_start = None
 
-        # Chunk Boundary Lock Logic (Fixes Deadlock)
-        prev_w = self.words[self.last_matched_global] if self.last_matched_global >= 0 else None
-        is_at_boundary = False
-        if prev_w and (expected.paragraph_idx != prev_w.paragraph_idx or 
-                       expected.sentence_idx != prev_w.sentence_idx or 
-                       expected.chunk_idx != prev_w.chunk_idx):
-            is_at_boundary = True
+        # Try chunk-level alignment
+        if engine._stt_buffer:
+            chunk_out = self.process_chunk_alignment(now, engine)
+            if chunk_out:
+                out.extend(chunk_out)
+                return out
 
-        if is_at_boundary and not getattr(self, "_chunk_boundary_cleared", False):
-            if engine._silence_run_ms >= 400:
-                self._chunk_boundary_cleared = True
-            else:
-                return out # Wait for pause before starting new chunk
-
+        # Fallback: word-by-word matching as before
         if engine._silence_run_ms > 50:
             self.max_silence_inside_chunk_ms = max(
                 self.max_silence_inside_chunk_ms,
@@ -104,6 +233,7 @@ class SessionController:
                     "expected_word": expected.text,
                 }
             )
+            engine.add_to_stt_buffer(hyp)
 
         if not hyp:
             return out
@@ -117,8 +247,8 @@ class SessionController:
                 prev_g = self.last_matched_global
                 self._update_chunk_metrics(prev_g, expected, now)
                 self.last_matched_global = expected.global_word_index
-                self._chunk_boundary_cleared = False # Reset for the NEXT boundary
-                engine.reset_speech_timer() # CRITICAL: Reset timer so next word needs new sound
+                self._chunk_boundary_cleared = False
+                engine.reset_speech_timer()
                 out.append(
                     {
                         "type": "word_matched",

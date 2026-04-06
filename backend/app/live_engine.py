@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import math
 import struct
+import time
 from collections import deque
+from difflib import SequenceMatcher
 
 from .config import PCM_SAMPLE_RATE, VAD_THRESHOLD_DB
 
@@ -46,6 +48,8 @@ class CpuLiveTrack:
         self.voice_db_threshold = voice_db_threshold if voice_db_threshold is not None else VAD_THRESHOLD_DB
         self._speech_run_ms = 0.0
         self._silence_run_ms = 0.0
+        self._stt_buffer: list[str] = []
+        self._stt_buffer_time = time.monotonic()
 
     def ingest_pcm(self, chunk: bytes) -> float:
         self.buffer.extend(chunk)
@@ -72,3 +76,17 @@ class CpuLiveTrack:
     def reset_speech_timer(self) -> None:
         """Manual reset after word match to prevent chain-matches."""
         self._speech_run_ms = 0.0
+
+    def add_to_stt_buffer(self, word: str) -> None:
+        """Add a recognized word to the STT buffer for chunk-level alignment."""
+        self._stt_buffer.append(word.lower())
+        self._stt_buffer_time = time.monotonic()
+
+    def get_stt_buffer_phrase(self) -> str:
+        """Return the buffered STT phrase as a single string."""
+        return " ".join(self._stt_buffer)
+
+    def clear_stt_buffer(self) -> None:
+        """Clear the STT buffer after chunk advance."""
+        self._stt_buffer = []
+        self._stt_buffer_time = time.monotonic()

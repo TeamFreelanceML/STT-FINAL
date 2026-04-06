@@ -71,15 +71,6 @@ function wsBase(): string {
   return "ws://127.0.0.1:8005";
 }
 
-/** Resolve paths like `/static/...` when using the dev proxy. */
-function resolveBackendUrl(path: string): string {
-  if (path.startsWith("http://") || path.startsWith("https://")) return path;
-  if (typeof window === "undefined") return path;
-  const direct = process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "");
-  if (direct) return new URL(path, direct).href;
-  return new URL(`/api/backend${path}`, window.location.origin).href;
-}
-
 type ModalKind = "continue" | "recording" | null;
 
 type WordResult = {
@@ -296,6 +287,30 @@ export function ReadingProvider({ children }: { children: React.ReactNode }) {
         }));
         const nextIndex = Math.min(countStoryWords(story) - 1, g + 1);
         setSessionState(locateWordPosition(story, nextIndex));
+      }
+
+      if (msg.type === "word_matched_bulk") {
+        setWordProgress(null);
+        const matches = (msg.matches as Array<{ global_word_index: number; score: number }>) || [];
+        setWordResults((prev) => {
+          const updated = { ...prev };
+          matches.forEach((match) => {
+            updated[match.global_word_index] = {
+              status: "correct",
+              score: match.score || 0.95,
+            };
+          });
+          return updated;
+        });
+        if (matches.length > 0) {
+          const lastMatch = Math.max(...matches.map((m) => m.global_word_index));
+          const nextIndex = Math.min(countStoryWords(story) - 1, lastMatch + 1);
+          setSessionState(locateWordPosition(story, nextIndex));
+        }
+      }
+
+      if (msg.type === "chunk_advance") {
+        setWordProgress(null);
       }
 
       if (msg.type === "assist_ack" && msg.skipped === true) {

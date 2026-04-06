@@ -5,7 +5,7 @@ import { useReading } from "@/context/ReadingProvider";
 
 type LogEntry = {
   id: string;
-  type: "partial" | "matched" | "noise" | "mispronounce";
+  type: "partial" | "matched" | "noise" | "mispronounce" | "phrase";
   text: string;
   timestamp: number;
 };
@@ -15,6 +15,7 @@ export function LiveVoiceLog() {
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const logsRef = useRef<LogEntry[]>([]);
+  const phraseTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   const addLog = useCallback((entry: LogEntry) => {
     logsRef.current = [...logsRef.current.slice(-49), entry];
@@ -22,14 +23,21 @@ export function LiveVoiceLog() {
   }, []);
 
   useEffect(() => {
-    if (wordProgress) {
-      const entry: LogEntry = {
-        id: `progress-${Date.now()}-${Math.random()}`,
-        type: "partial",
-        text: wordProgress.charIndex > 0 ? `[Partial] char_idx=${wordProgress.charIndex}` : "[Silent]",
-        timestamp: Date.now(),
-      };
-      addLog(entry);
+    if (wordProgress && wordProgress.charIndex > 0) {
+      if (phraseTimeoutRef.current) {
+        clearTimeout(phraseTimeoutRef.current);
+      }
+      
+      const phrase = `[Heard]: char_idx=${wordProgress.charIndex}`;
+      phraseTimeoutRef.current = setTimeout(() => {
+        const entry: LogEntry = {
+          id: `phrase-${Date.now()}-${Math.random()}`,
+          type: "phrase",
+          text: phrase,
+          timestamp: Date.now(),
+        };
+        addLog(entry);
+      }, 500);
     }
   }, [wordProgress, addLog]);
 
@@ -64,6 +72,9 @@ export function LiveVoiceLog() {
           } else if (log.type === "noise") {
             colorClass = "text-gray-500";
             prefix = "~ ";
+          } else if (log.type === "phrase") {
+            colorClass = "text-cyan-400 font-semibold";
+            prefix = "🎤 ";
           }
 
           return (

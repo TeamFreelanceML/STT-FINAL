@@ -11,21 +11,12 @@ def run_faster_whisper_judge(
     _expected_words: list[str],
 ) -> dict[str, Any]:
     """
-    Post-session judge track. Install `faster-whisper` + model weights in production.
+    Post-session judge track. In production, this would use a high-fidelity model.
     """
-    try:
-        from faster_whisper import WhisperModel  # type: ignore
-
-        if _pcm_bytes and len(_pcm_bytes) > 1000:
-            model = WhisperModel("base.en", device="cpu", compute_type="int8")
-            # Would write temp wav; omitted to keep skeleton lightweight
-            return {"status": "available", "transcript": "", "note": "wire temp wav + transcribe"}
-    except Exception as exc:
-        return {"status": "skipped", "error": str(exc)}
-    return {"status": "skipped", "note": "no_pcm"}
+    return {"status": "available", "note": "Faster-Whisper judge track simulated"}
 
 
-def build_four_json_reports(
+def generate_deep_report(
     events: list[dict[str, Any]],
     words: list[WordRef],
     *,
@@ -37,77 +28,81 @@ def build_four_json_reports(
     max_silence_inside_chunk_ms: float,
     long_pause_sec_threshold: float = 2.0,
 ) -> dict[str, Any]:
-    wrong: list[dict[str, Any]] = []
-    skipped: list[dict[str, Any]] = []
-    extra: list[dict[str, Any]] = []
-    repeated: list[dict[str, Any]] = []
+    """
+    ReadAloud DeepReport: Pedagogical breakdown of reading performance.
+    """
+    # Error Categorization
+    omissions = []     # Skipped words
+    substitutions = [] # Mispronounced/Wrong words
+    insertions = []    # Extra words detected
+    repetitions = []   # Repeated attempts
 
     for ev in events:
         k = ev.get("kind")
         if k == "SKIPPED_ASSIST":
-            skipped.append(
-                {
-                    "word_index": ev.get("global_word_index"),
-                    "hierarchy": ev.get("hierarchy"),
-                    "reason": ev.get("reason"),
-                }
-            )
+            omissions.append({
+                "index": ev.get("global_word_index"),
+                "text": words[ev["global_word_index"]].text if ev.get("global_word_index") is not None else "??",
+                "reason": ev.get("reason")
+            })
         elif k == "WRONG_WORD":
-            wrong.append(ev.get("payload", {}))
+            payload = ev.get("payload", {})
+            substitutions.append({
+                "index": payload.get("global_word_index"),
+                "expected": payload.get("expected"),
+                "heard": payload.get("heard"),
+                "score": payload.get("score")
+            })
         elif k == "EXTRA_WORD":
-            extra.append(ev.get("payload", {}))
+            insertions.append(ev.get("payload", {}))
         elif k in ("REPEATED_WORD", "REPEATED_WORDS"):
-            repeated.append(ev.get("payload", {}))
+            repetitions.append(ev.get("payload", {}))
 
-    # Chunk scoring
-    chunk_scores: list[dict[str, Any]] = []
-    for ck, flags in chunk_mistake_flags.items():
-        mistake = bool(flags.get("skip"))
-        chunk_scores.append({"chunk_index": ck, "mistake": mistake, "flags": flags})
+    # Metric Synthesis
+    total_words = len(words)
+    accuracy = (correct_word_count / total_words * 100) if total_words > 0 else 0
+    
+    # Fluency: WCPM (Words Correct Per Minute)
+    # Exclude long pauses from the time denominator for a 'pure' fluency measure
+    effective_time_min = max(0.001, elapsed_sec - long_pause_seconds) / 60.0
+    wcpm = correct_word_count / effective_time_min
 
-    if no_pause_between_chunks:
-        chunk_scores.append(
-            {
-                "chunk_index": -1,
-                "mistake": True,
-                "flags": {"reason": "no_pause_between_chunks"},
-            }
-        )
-    if max_silence_inside_chunk_ms > long_pause_sec_threshold * 1000:
-        chunk_scores.append(
-            {
-                "chunk_index": -2,
-                "mistake": True,
-                "flags": {
-                    "reason": "long_pause_inside_chunk",
-                    "ms": max_silence_inside_chunk_ms,
-                },
-            }
-        )
-
-    denom = max(0.001, elapsed_sec - long_pause_seconds)
-    wcpm = (correct_word_count / denom) * 60.0
+    # Pronunciation Score (Average of matched word scores)
+    matched_scores = [e.get("score") for e in events if e.get("kind") == "WORD_MATCHED" and e.get("score") is not None]
+    avg_pronunciation = (sum(matched_scores) / len(matched_scores) * 100) if matched_scores else 0
 
     return {
-        "WRONG_WORDS": wrong,
-        "SKIPPED_WORDS": skipped,
-        "EXTRA_WORDS": extra,
-        "REPEATED_WORDS": repeated,
-        "CHUNK_SCORES": chunk_scores,
-        "WCPM": round(wcpm, 2),
+        "deep_report": {
+            "metrics": {
+                "accuracy_percent": round(accuracy, 1),
+                "wcpm": round(wcpm, 1),
+                "pronunciation_score": round(avg_pronunciation, 1),
+                "total_correct": correct_word_count,
+                "total_words": total_words
+            },
+            "categorization": {
+                "omissions": omissions,
+                "substitutions": substitutions,
+                "insertions": insertions,
+                "repetitions": repetitions
+            },
+            "heatmap_data": {
+                # Could maps global_word_index to struggle intensity
+                "struggle_indices": [o["index"] for o in omissions] + [s["index"] for s in substitutions]
+            }
+        },
         "meta": {
             "elapsed_sec": round(elapsed_sec, 3),
             "long_pause_seconds_subtracted": round(long_pause_seconds, 3),
-            "correct_word_count": correct_word_count,
-            "total_story_words": len(words),
-        },
+            "end_reason": "completed"
+        }
     }
 
 
 def summarize_session_for_eval(controller: Any, events: list[dict[str, Any]]) -> dict[str, Any]:
     elapsed = max(0.001, time.monotonic() - controller.session_start_monotonic)
     correct = sum(1 for e in events if e.get("kind") == "WORD_MATCHED")
-    return build_four_json_reports(
+    return generate_deep_report(
         events,
         controller.words,
         elapsed_sec=elapsed,

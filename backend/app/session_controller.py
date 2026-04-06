@@ -4,12 +4,24 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from .config import LONG_PAUSE_SEC, PHONETIC_THRESHOLD
+from .config import LONG_PAUSE_SEC, PHONETIC_THRESHOLD, VAD_THRESHOLD_DB
+from .matcher import is_word_match, phonetic_similarity, normalize_token
 from .story_hierarchy import ChunkRef
-from .matcher import is_word_match, phonetic_similarity
 from .story_hierarchy import WordRef, compare_pointer_forward, pointer_tuple
 
 from .live_engine import CpuLiveTrack
+
+def _prefix_match_length(expected: str, spoken: str) -> int:
+    expected_text = normalize_token(expected)
+    spoken_text = normalize_token(spoken)
+    if not expected_text or not spoken_text:
+        return 0
+    matched = 0
+    for a, b in zip(expected_text, spoken_text):
+        if a != b:
+            break
+        matched += 1
+    return matched
 
 
 @dataclass
@@ -27,6 +39,8 @@ class SessionController:
     session_start_monotonic: float = field(default_factory=time.monotonic)
     long_pause_seconds_accumulated: float = 0.0
     _last_silence_start: float | None = None
+    _chunk_boundary_cleared: bool = True
+    _last_mispronounce_hyp: str = ""
 
     def expected_word(self) -> WordRef | None:
         nxt = self.last_matched_global + 1
@@ -58,6 +72,20 @@ class SessionController:
                     self.long_pause_seconds_accumulated += dur - LONG_PAUSE_SEC
                 self._last_silence_start = None
 
+        # Chunk Boundary Lock Logic (Fixes Deadlock)
+        prev_w = self.words[self.last_matched_global] if self.last_matched_global >= 0 else None
+        is_at_boundary = False
+        if prev_w and (expected.paragraph_idx != prev_w.paragraph_idx or 
+                       expected.sentence_idx != prev_w.sentence_idx or 
+                       expected.chunk_idx != prev_w.chunk_idx):
+            is_at_boundary = True
+
+        if is_at_boundary and not getattr(self, "_chunk_boundary_cleared", False):
+            if engine._silence_run_ms >= 400:
+                self._chunk_boundary_cleared = True
+            else:
+                return out # Wait for pause before starting new chunk
+
         if engine._silence_run_ms > 50:
             self.max_silence_inside_chunk_ms = max(
                 self.max_silence_inside_chunk_ms,
@@ -66,12 +94,13 @@ class SessionController:
 
         hyp = engine.hypothesis_for_speech(expected.text)
         if hyp:
-            matched_chars = min(len(expected.text), max(0, len(hyp)))
+            char_index = _prefix_match_length(expected.text, hyp)
             out.append(
                 {
-                    "type": "word_char_progress",
-                    "global_word_index": expected.global_word_index,
-                    "matched_chars": matched_chars,
+                    "type": "word_progress",
+                    "status": "partial",
+                    "matched_index": expected.global_word_index,
+                    "char_index": char_index,
                     "expected_word": expected.text,
                 }
             )
@@ -88,6 +117,8 @@ class SessionController:
                 prev_g = self.last_matched_global
                 self._update_chunk_metrics(prev_g, expected, now)
                 self.last_matched_global = expected.global_word_index
+                self._chunk_boundary_cleared = False # Reset for the NEXT boundary
+                engine.reset_speech_timer() # CRITICAL: Reset timer so next word needs new sound
                 out.append(
                     {
                         "type": "word_matched",
@@ -104,15 +135,17 @@ class SessionController:
         else:
             self.attempts_on_target += 1
             if 0.2 < score < PHONETIC_THRESHOLD:
-                out.append(
-                    {
-                        "type": "mispronounce",
-                        "global_word_index": expected.global_word_index,
-                        "expected_word": expected.text,
-                        "heard": hyp,
-                        "score": round(score, 4),
-                    }
-                )
+                if hyp != self._last_mispronounce_hyp:
+                    out.append(
+                        {
+                            "type": "mispronounce",
+                            "global_word_index": expected.global_word_index,
+                            "expected_word": expected.text,
+                            "heard": hyp,
+                            "score": round(score, 4),
+                        }
+                    )
+                    self._last_mispronounce_hyp = hyp
             if self.attempts_on_target >= 2:
                 out.append(
                     {

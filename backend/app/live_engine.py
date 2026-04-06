@@ -4,7 +4,7 @@ import math
 import struct
 from collections import deque
 
-from .config import PCM_SAMPLE_RATE
+from .config import PCM_SAMPLE_RATE, VAD_THRESHOLD_DB
 
 
 def pcm16_rms_db(chunk: bytes) -> float:
@@ -41,9 +41,9 @@ class CpuLiveTrack:
     Swap `hypothesis_for_speech` for Sherpa-ONNX streaming + Silero VAD.
     """
 
-    def __init__(self, voice_db_threshold: float = -35.0) -> None:
+    def __init__(self, voice_db_threshold: float | None = None) -> None:
         self.buffer = RingBuffer(max_bytes=PCM_SAMPLE_RATE * 2 * 4)
-        self.voice_db_threshold = voice_db_threshold
+        self.voice_db_threshold = voice_db_threshold if voice_db_threshold is not None else VAD_THRESHOLD_DB
         self._speech_run_ms = 0.0
         self._silence_run_ms = 0.0
 
@@ -62,8 +62,13 @@ class CpuLiveTrack:
     def hypothesis_for_speech(self, expected_text: str) -> str:
         """Stub Zipformer partial — replace with Sherpa streaming result."""
         w = expected_text
-        if self._speech_run_ms < 120:
+        if self._speech_run_ms < 80:
             return ""
-        frac = min(1.0, self._speech_run_ms / 900.0)
+        # Faster matching (250ms for a full word) for better feel
+        frac = min(1.0, self._speech_run_ms / 250.0)
         n = max(1, int(len(w) * frac))
         return w[:n]
+
+    def reset_speech_timer(self) -> None:
+        """Manual reset after word match to prevent chain-matches."""
+        self._speech_run_ms = 0.0

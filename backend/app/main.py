@@ -46,23 +46,27 @@ CLIENT_SESSIONS: dict[str, ClientSession] = {}
 EVALUATION_CACHE: dict[str, dict[str, Any]] = {}
 
 
-def _ensure_assist_wav() -> None:
-    os.makedirs(TTS_VOICE_DIR, exist_ok=True)
-    path = os.path.join(TTS_VOICE_DIR, "assist.wav")
+def _ensure_word_wav(word: str) -> str:
+    word_safe = "".join(c for c in word.lower() if c.isalnum()) or "word"
+    os.makedirs(os.path.join(TTS_VOICE_DIR, "words"), exist_ok=True)
+    path = os.path.join(TTS_VOICE_DIR, "words", f"{word_safe}.wav")
     if os.path.isfile(path) and os.path.getsize(path) > 100:
-        return
+        return f"/static/tts/voice_1_bm_lewis/words/{word_safe}.wav"
+    
+    # Generate 0.5s silent placeholder (simulating TTS output)
     with wave.open(path, "w") as wf:
         wf.setnchannels(1)
         wf.setsampwidth(2)
         wf.setframerate(16_000)
         for _ in range(8_000):
             wf.writeframes(struct.pack("<h", 0))
+    return f"/static/tts/voice_1_bm_lewis/words/{word_safe}.wav"
 
 
 @app.on_event("startup")
 async def _startup() -> None:
     await store.connect()
-    _ensure_assist_wav()
+    os.makedirs(TTS_VOICE_DIR, exist_ok=True)
     static_root = os.path.join(os.path.dirname(__file__), "..", "static")
     os.makedirs(static_root, exist_ok=True)
     app.mount("/static", StaticFiles(directory=static_root), name="static")
@@ -89,6 +93,11 @@ async def create_session() -> dict[str, str]:
         chunks=chunks,
         store=store,
     )
+    # TTS Pre-Warming: Ensure audio snippets exist for all unique words
+    unique_words = {w.text for w in words}
+    for uw in unique_words:
+        _ensure_word_wav(uw)
+
     CLIENT_SESSIONS[sid] = ClientSession(controller=ctrl, engine=CpuLiveTrack())
     await store.hset_json(
         sid,
@@ -200,6 +209,12 @@ async def ws_read(session_id: str, websocket: WebSocket) -> None:
                     ack = await ctrl.handle_assist_skip(
                         data.get("reason", "watchdog"),
                     )
+                    # Point to the specific pre-warmed word snippet
+                    expected = ctrl.expected_word()
+                    if expected:
+                        word_safe = "".join(c for c in expected.text.lower() if c.isalnum()) or "word"
+                        ack["tts_url"] = f"/static/tts/voice_1_bm_lewis/words/{word_safe}.wav"
+                    
                     await websocket.send_json(ack)
                 elif t == "PING":
                     await websocket.send_json({"type": "pong"})

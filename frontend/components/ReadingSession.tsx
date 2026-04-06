@@ -3,6 +3,7 @@
 import { useReading } from "@/context/ReadingProvider";
 import { ReadingView } from "@/components/ReadingView";
 import { SessionModals } from "@/components/SessionModals";
+import { LiveVoiceLog } from "@/components/LiveVoiceLog";
 
 export function ReadingSession() {
   const {
@@ -78,6 +79,8 @@ export function ReadingSession() {
       ) : null}
 
       <SessionModals />
+
+      {isReading && <LiveVoiceLog />}
     </div>
   );
 }

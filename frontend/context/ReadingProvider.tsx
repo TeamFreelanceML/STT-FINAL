@@ -21,27 +21,90 @@ import type { Story } from "@/types/story";
 
 const story = storyData as Story;
 
-function apiBase(): string {
-  return (
-    process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "") ??
-    "http://127.0.0.1:8000"
-  );
+function locateWordPosition(story: Story, globalIndex: number) {
+  let g = 0;
+  for (let paragraphIdx = 0; paragraphIdx < story.paragraphs.length; paragraphIdx += 1) {
+    const paragraph = story.paragraphs[paragraphIdx];
+    for (let sentenceIdx = 0; sentenceIdx < paragraph.sentences.length; sentenceIdx += 1) {
+      const sentence = paragraph.sentences[sentenceIdx];
+      for (let chunkIdx = 0; chunkIdx < sentence.chunks.length; chunkIdx += 1) {
+        const words = sentence.chunks[chunkIdx].words;
+        if (globalIndex < g + words.length) {
+          return {
+            currentParaIdx: paragraphIdx,
+            currentSentIdx: sentenceIdx,
+            currentChunkIdx: chunkIdx,
+            wordPtr: globalIndex,
+          };
+        }
+        g += words.length;
+      }
+    }
+  }
+  const lastParagraphIdx = Math.max(0, story.paragraphs.length - 1);
+  const lastSentenceIdx = Math.max(0, story.paragraphs[lastParagraphIdx].sentences.length - 1);
+  const lastChunkIdx = Math.max(0, story.paragraphs[lastParagraphIdx].sentences[lastSentenceIdx].chunks.length - 1);
+  return {
+    currentParaIdx: lastParagraphIdx,
+    currentSentIdx: lastSentenceIdx,
+    currentChunkIdx: lastChunkIdx,
+    wordPtr: Math.max(0, globalIndex),
+  };
 }
 
+/** HTTP: use Next rewrite `/api/backend/*` unless NEXT_PUBLIC_API_URL is set (direct to FastAPI). */
+function httpApiPrefix(): string {
+  const direct = process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "");
+  if (direct) return direct;
+  return "/api/backend";
+}
+
+/**
+ * WebSocket must hit FastAPI directly (Next rewrites don’t apply). Default matches next.config BACKEND_URL (8005).
+ */
 function wsBase(): string {
   if (process.env.NEXT_PUBLIC_WS_URL) {
     return process.env.NEXT_PUBLIC_WS_URL.replace(/\/$/, "");
   }
-  return apiBase().replace(/^http/, "ws");
+  const direct = process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "");
+  if (direct) return direct.replace(/^http/, "ws");
+  return "ws://127.0.0.1:8005";
+}
+
+/** Resolve paths like `/static/...` when using the dev proxy. */
+function resolveBackendUrl(path: string): string {
+  if (path.startsWith("http://") || path.startsWith("https://")) return path;
+  if (typeof window === "undefined") return path;
+  const direct = process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "");
+  if (direct) return new URL(path, direct).href;
+  return new URL(`/api/backend${path}`, window.location.origin).href;
 }
 
 type ModalKind = "continue" | "recording" | null;
 
+type WordResult = {
+  status: "pending" | "current" | "correct" | "skipped" | "wrong" | "repeated";
+  score?: number;
+};
+
+type SessionState = {
+  currentParaIdx: number;
+  currentSentIdx: number;
+  currentChunkIdx: number;
+  wordPtr: number;
+};
+
+type WordProgress = {
+  matchedIndex: number;
+  charIndex: number;
+} | null;
+
 type ReadingCtx = {
   story: Story;
   sessionId: string | null;
-  lastMatchedGlobal: number;
-  charMatched: number;
+  sessionState: SessionState;
+  wordResults: Record<number, WordResult>;
+  wordProgress: WordProgress;
   isReading: boolean;
   error: string | null;
   modal: ModalKind;
@@ -63,15 +126,20 @@ export function useReading(): ReadingCtx {
 
 export function ReadingProvider({ children }: { children: React.ReactNode }) {
   const [sessionId, setSessionId] = useState<string | null>(null);
-  const [lastMatchedGlobal, setLastMatchedGlobal] = useState(-1);
-  const [charMatched, setCharMatched] = useState(0);
+  const [sessionState, setSessionState] = useState<SessionState>({
+    currentParaIdx: 0,
+    currentSentIdx: 0,
+    currentChunkIdx: 0,
+    wordPtr: 0,
+  });
+  const [wordResults, setWordResults] = useState<Record<number, WordResult>>({});
+  const [wordProgress, setWordProgress] = useState<WordProgress>(null);
   const [isReading, setIsReading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [modal, setModal] = useState<ModalKind>(null);
   const [evaluation, setEvaluation] = useState<unknown | null>(null);
 
   const sessionIdRef = useRef<string | null>(null);
-  const lastMatchedRef = useRef(-1);
   const wsRef = useRef<WebSocket | null>(null);
   const cleanupAudioRef = useRef<(() => void) | null>(null);
   const timersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
@@ -79,10 +147,6 @@ export function ReadingProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     sessionIdRef.current = sessionId;
   }, [sessionId]);
-
-  useEffect(() => {
-    lastMatchedRef.current = lastMatchedGlobal;
-  }, [lastMatchedGlobal]);
 
   const clearTimers = useCallback(() => {
     timersRef.current.forEach(clearTimeout);
@@ -93,7 +157,7 @@ export function ReadingProvider({ children }: { children: React.ReactNode }) {
     const sid = sessionIdRef.current;
     if (!sid) return;
     try {
-      const res = await fetch(`${apiBase()}/sessions/${sid}/end`, {
+      const res = await fetch(`${httpApiPrefix()}/sessions/${sid}/end`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ reason }),
@@ -142,19 +206,24 @@ export function ReadingProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (isReading) armWatchdog();
     return () => clearTimers();
-  }, [armWatchdog, clearTimers, isReading, lastMatchedGlobal]);
+  }, [armWatchdog, clearTimers, isReading, sessionState.wordPtr]);
 
   const startReading = useCallback(async () => {
     setError(null);
     setEvaluation(null);
     stopReading();
-    lastMatchedRef.current = -1;
-    setLastMatchedGlobal(-1);
-    setCharMatched(0);
+    setSessionState({
+      currentParaIdx: 0,
+      currentSentIdx: 0,
+      currentChunkIdx: 0,
+      wordPtr: 0,
+    });
+    setWordResults({});
+    setWordProgress(null);
 
     let sid: string;
     try {
-      const res = await fetch(`${apiBase()}/sessions`, { method: "POST" });
+      const res = await fetch(`${httpApiPrefix()}/sessions`, { method: "POST" });
       if (!res.ok) throw new Error(`sessions ${res.status}`);
       const data = (await res.json()) as { session_id: string };
       sid = data.session_id;
@@ -200,34 +269,84 @@ export function ReadingProvider({ children }: { children: React.ReactNode }) {
     ws.onmessage = async (ev) => {
       if (typeof ev.data !== "string") return;
       const msg = JSON.parse(ev.data) as Record<string, unknown>;
+
+      if (msg.type === "session_state") {
+        setWordProgress(null);
+        setSessionState(msg.state as SessionState);
+      }
+
+      if (msg.type === "word_progress") {
+        const matchedIndex = msg.matched_index as number;
+        setWordProgress({
+          matchedIndex,
+          charIndex: msg.char_index as number,
+        });
+        setSessionState(locateWordPosition(story, matchedIndex));
+      }
+
       if (msg.type === "word_matched") {
+        setWordProgress(null);
         const g = msg.global_word_index as number;
-        lastMatchedRef.current = g;
-        setLastMatchedGlobal(g);
-        setCharMatched(0);
+        setWordResults((prev) => ({
+          ...prev,
+          [g]: {
+            status: "correct",
+            score: msg.score as number,
+          },
+        }));
+        const nextIndex = Math.min(countStoryWords(story) - 1, g + 1);
+        setSessionState(locateWordPosition(story, nextIndex));
       }
-      if (msg.type === "word_char_progress") {
+
+      if (msg.type === "assist_ack" && msg.skipped === true) {
+        setWordProgress(null);
         const g = msg.global_word_index as number;
-        if (g === lastMatchedRef.current + 1) {
-          setCharMatched(msg.matched_chars as number);
-        }
+        setWordResults((prev) => ({
+          ...prev,
+          [g]: {
+            status: "skipped",
+          },
+        }));
+        const nextIndex = Math.min(countStoryWords(story) - 1, g + 1);
+        setSessionState(locateWordPosition(story, nextIndex));
       }
-      if (msg.type === "assist_ack" && msg.skipped) {
+
+      if (msg.type === "word_skipped") {
+        setWordProgress(null);
         const g = msg.global_word_index as number;
-        lastMatchedRef.current = g;
-        setLastMatchedGlobal(g);
-        setCharMatched(0);
-        if (msg.tts_url) {
-          const url = new URL(msg.tts_url as string, apiBase()).href;
-          try {
-            const a = new Audio(url);
-            void a.play();
-          } catch {
-            speechSynthesis.speak(
-              new SpeechSynthesisUtterance("Let me help with this word."),
-            );
-          }
-        }
+        setWordResults((prev) => ({
+          ...prev,
+          [g]: {
+            status: "skipped",
+          },
+        }));
+        const nextIndex = Math.min(countStoryWords(story) - 1, g + 1);
+        setSessionState(locateWordPosition(story, nextIndex));
+      }
+
+      if (msg.type === "mispronounce") {
+        const g = msg.global_word_index as number;
+        setWordResults((prev) => ({
+          ...prev,
+          [g]: {
+            status: "wrong",
+            score: msg.score as number,
+          },
+        }));
+      }
+
+      if (msg.type === "chunk_completed") {
+        // Handled by subsequent session_state normally
+        setWordProgress(null);
+      }
+
+      // Legacy word_matched support
+      if (msg.type === "word_matched_legacy") {
+        const g = msg.global_word_index as number;
+        setWordResults((prev) => ({
+          ...prev,
+          [g]: { status: "correct" },
+        }));
       }
     };
 
@@ -286,8 +405,9 @@ export function ReadingProvider({ children }: { children: React.ReactNode }) {
     () => ({
       story,
       sessionId,
-      lastMatchedGlobal,
-      charMatched,
+      sessionState,
+      wordResults,
+      wordProgress,
       isReading,
       error,
       modal,
@@ -299,8 +419,9 @@ export function ReadingProvider({ children }: { children: React.ReactNode }) {
     }),
     [
       sessionId,
-      lastMatchedGlobal,
-      charMatched,
+      sessionState,
+      wordResults,
+      wordProgress,
       isReading,
       error,
       modal,
@@ -316,9 +437,9 @@ export function ReadingProvider({ children }: { children: React.ReactNode }) {
 }
 
 export function useTargetSentenceIndex(): number {
-  const { story, lastMatchedGlobal } = useReading();
+  const { story, sessionState } = useReading();
   const flat = flattenSentences(story);
-  const target = lastMatchedGlobal + 1;
+  const target = sessionState.wordPtr;
   let g = 0;
   for (let si = 0; si < flat.length; si++) {
     const n = wordsInSentence(flat[si].sentence).length;
@@ -329,15 +450,20 @@ export function useTargetSentenceIndex(): number {
 }
 
 export function useReadingProgressHelpers() {
-  const { story, lastMatchedGlobal, charMatched } = useReading();
+  const { story, sessionState, wordProgress } = useReading();
   const matchedLengthForWord = useCallback(
     (globalIndex: number, word: string) => {
-      if (globalIndex <= lastMatchedGlobal) return word.length;
-      if (globalIndex === lastMatchedGlobal + 1)
-        return Math.min(word.length, charMatched);
+      if (globalIndex < sessionState.wordPtr) return word.length;
+      if (
+        wordProgress &&
+        wordProgress.matchedIndex === globalIndex &&
+        globalIndex === sessionState.wordPtr
+      ) {
+        return Math.min(word.length, wordProgress.charIndex);
+      }
       return 0;
     },
-    [charMatched, lastMatchedGlobal],
+    [sessionState.wordPtr, wordProgress],
   );
   return {
     matchedLengthForWord,

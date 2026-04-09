@@ -213,94 +213,97 @@ Expected:
 
 ### Prerequisites
 
-- Node.js 18+
-- Python 3.10+
-- ffmpeg installed and available on PATH
+| Tool | Version | Purpose |
+| :--- | :--- | :--- |
+| **Node.js** | 20+ | Frontend (Next.js) |
+| **Python** | 3.10+ | Backend (FastAPI) |
+| **FFmpeg** | Latest | Audio preprocessing |
+| **Docker** | Latest | Containerized deployment (Optional) |
 
-For Windows:
+#### Installing FFmpeg
+FFmpeg is **required** for backend audio processing.
+- **Windows**: `winget install ffmpeg`
+- **macOS**: `brew install ffmpeg`
+- **Linux**: `sudo apt install ffmpeg`
 
+---
+
+## Local Development Setup
+
+### 1. Backend Setup
 ```powershell
-winget install ffmpeg
+cd backend
+python -m venv venv
+# Windows:
+.\venv\Scripts\activate
+# macOS/Linux:
+source venv/bin/activate
+
+pip install --upgrade pip
+pip install -r requirements.txt
 ```
 
-## Frontend Setup
-
+### 2. Frontend Setup
 ```powershell
 cd frontend
 npm install
-npm run download-model
+npm run download-model  # Downloads Sherpa ONNX assets
 ```
 
-Frontend environment file:
-
-Create `.env.local` or use defaults:
-
+### 3. Environment Configuration
+Create a `.env.local` in the `frontend` directory:
 ```env
 NEXT_PUBLIC_EVALUATION_API_BASE_URL=http://localhost:8000
 NEXT_PUBLIC_TTS_WORD_API_URL=http://localhost:8001/narrate/word
 ```
 
-Sherpa model download:
+---
 
-You can also use the provided drive link if needed:
+## How To Run Locally
 
-`https://drive.google.com/drive/folders/1NTYKExmHQWWqujWoEQVh6u9rwnBOcEgI?usp=sharing`
-
-## Backend Setup
-
+### Step 1: Start Backend
 ```powershell
 cd backend
-python -m venv venv
-venv\Scripts\activate
-pip install -r requirements.txt
+.\venv\Scripts\activate
 python main.py
 ```
+*Health check: `http://localhost:8000/health`*
 
-Backend environment values are optional and default-safe:
-
-```env
-STT_MODEL_NAME=base
-API_HOST=0.0.0.0
-API_PORT=8000
-```
-
-## How To Run
-
-### Run locally
-
-Terminal 1:
-
-```powershell
-cd backend
-venv\Scripts\activate
-python main.py
-```
-
-Terminal 2:
-
+### Step 2: Start Frontend
 ```powershell
 cd frontend
 npm run dev
 ```
+*Access App: `http://localhost:3000`*
 
-Open:
+---
 
-- Frontend: `http://localhost:3000`
-- Backend health: `http://localhost:8000/health`
+## Docker Deployment (Safe Setup)
 
-### Docker
+This project includes production-ready Docker configurations. We recommend using Docker for consistent environment management.
 
-Docker files are included for frontend and backend.
+### Safe Deployment Steps
 
-At the repo root:
+1. **Environment Isolation**: Build arguments are used to bake the API URLs into the frontend image during the build process, ensuring they are available at runtime for Next.js.
+2. **Minimal Footprint**: The backend uses `python:3.11-slim` to reduce attack surface and image size.
+3. **No-Cache Policy**: Python dependencies are installed using `--no-cache-dir` to prevent bloating the image.
+
+### Running with Docker Compose
+
+From the root project directory, run:
 
 ```powershell
+# Build and start both services
 docker compose up --build
 ```
 
-Notes:
-- frontend and backend Dockerfiles are ready
-- runtime Docker validation for the external TTS service is separate
+**What happens:**
+- **Backend**: Stays on port `8000`. Installs `ffmpeg` automatically inside the container.
+- **Frontend**: Staged on port `3000`. 
+- **Networking**: Frontend communicates with the backend via `http://localhost:8000` (browser-side).
+
+> [!CAUTION]
+> **Safety Note**: Never commit your `.env` files to version control. The included `.gitignore` is already configured to skip these files.
 
 ## Backend API
 

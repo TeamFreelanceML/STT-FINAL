@@ -28,3 +28,18 @@ Thumbs.db
 # Logs
 *.log
 npm-debug.log*
+
+# Models & Large Binaries
+*.wasm
+*.data
+*.onnx
+*.bin
+*.sst
+*.blob
+*.pt
+*.pth
+*.tflite
+models/
+Downloads/
+frontend/public/models/
+backend/models/

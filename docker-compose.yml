@@ -1,17 +1,26 @@
-services:
-  redis:
-    image: redis:7-alpine
-    ports:
-      - "6379:6379"
+version: "3.9"
 
-  api:
+services:
+  backend:
     build:
-      context: .
-      dockerfile: docker/Dockerfile.backend
+      context: ./backend
     ports:
       - "8000:8000"
     environment:
-      REDIS_URL: redis://redis:6379/0
-      STORY_PATH: /app/data/story.json
+      STT_MODEL_NAME: ${STT_MODEL_NAME:-base}
+      API_HOST: ${API_HOST:-0.0.0.0}
+      API_PORT: ${API_PORT:-8000}
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_EVALUATION_API_BASE_URL: ${NEXT_PUBLIC_EVALUATION_API_BASE_URL:-http://localhost:8000}
+        NEXT_PUBLIC_TTS_WORD_API_URL: ${NEXT_PUBLIC_TTS_WORD_API_URL:-http://host.docker.internal:8001/narrate/word}
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_EVALUATION_API_BASE_URL: ${NEXT_PUBLIC_EVALUATION_API_BASE_URL:-http://localhost:8000}
+      NEXT_PUBLIC_TTS_WORD_API_URL: ${NEXT_PUBLIC_TTS_WORD_API_URL:-http://host.docker.internal:8001/narrate/word}
     depends_on:
-      - redis
+      - backend

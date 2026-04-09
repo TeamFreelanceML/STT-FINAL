@@ -1,22 +1,47 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
-import { Providers } from "./providers";
+import { Inter, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
 
-const geistSans = Geist({
-  variable: "--font-geist-sans",
+// ---------------------------------------------------------------------------
+// Fonts — bundled locally via next/font/google to avoid COOP/COEP issues
+// with external <link> requests
+// ---------------------------------------------------------------------------
+
+const inter = Inter({
+  variable: "--font-inter",
   subsets: ["latin"],
+  display: "swap",
+  weight: ["400", "500", "600", "700"],
 });
 
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
+const jetbrainsMono = JetBrains_Mono({
+  variable: "--font-jetbrains",
   subsets: ["latin"],
+  display: "swap",
+  weight: ["400", "500"],
 });
+
+// ---------------------------------------------------------------------------
+// SEO Metadata
+// ---------------------------------------------------------------------------
 
 export const metadata: Metadata = {
-  title: "Guided Reading",
-  description: "Blurred reading view with live audio streaming",
+  title: "ReadAloud — Real-Time Guided Reading",
+  description:
+    "A real-time guided reading system that listens to you read, highlights words live, and provides deep grading reports. Powered by browser-native WASM speech recognition.",
+  keywords: [
+    "reading",
+    "guided reading",
+    "speech recognition",
+    "STT",
+    "education",
+    "literacy",
+  ],
 };
+
+// ---------------------------------------------------------------------------
+// Root Layout
+// ---------------------------------------------------------------------------
 
 export default function RootLayout({
   children,
@@ -26,11 +51,9 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
+      className={`${inter.variable} ${jetbrainsMono.variable} h-full antialiased`}
     >
-      <body className="min-h-full flex flex-col">
-        <Providers>{children}</Providers>
-      </body>
+      <body className="min-h-full flex flex-col">{children}</body>
     </html>
   );
 }

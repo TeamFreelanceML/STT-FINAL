@@ -13,6 +13,13 @@ RUN npm ci
 
 COPY . .
 
+RUN npm run download-model \
+    && test -s public/sherpa-onnx/sherpa-onnx.js \
+    && test -s public/sherpa-onnx/sherpa-onnx-wasm-main-asr.js \
+    && test -s public/sherpa-onnx/sherpa-onnx-wasm-main-asr.wasm \
+    && test -s public/sherpa-onnx/sherpa-onnx-wasm-main-asr.data \
+    && test -s public/sherpa-onnx/tokens.txt
+
 RUN npm run build
 
 EXPOSE 3000

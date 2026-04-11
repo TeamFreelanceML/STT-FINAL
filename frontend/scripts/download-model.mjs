@@ -38,6 +38,8 @@ const ASSETS = [
   },
 ];
 
+const REQUIRED_LOCAL_FILES = ["tokens.txt"];
+
 function ensureDir(dir) {
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
@@ -108,6 +110,8 @@ async function main() {
 
   ensureDir(TARGET_DIR);
 
+  const failures = [];
+
   for (const asset of ASSETS) {
     const dest = path.join(TARGET_DIR, asset.saveAs);
     console.log(`\n${asset.name}`);
@@ -124,8 +128,25 @@ async function main() {
       }
       console.log(`Saved: ${asset.saveAs}`);
     } catch (err) {
-      console.error(`Failed: ${err.message}`);
+      const message = `Failed: ${err.message}`;
+      console.error(message);
+      failures.push(`${asset.saveAs}: ${err.message}`);
     }
+  }
+
+  for (const fileName of REQUIRED_LOCAL_FILES) {
+    const filePath = path.join(TARGET_DIR, fileName);
+    if (!fileExistsWithContent(filePath)) {
+      failures.push(`${fileName}: required local runtime asset is missing or empty`);
+    }
+  }
+
+  if (failures.length > 0) {
+    console.error("\nModel asset validation failed:");
+    for (const failure of failures) {
+      console.error(`- ${failure}`);
+    }
+    process.exit(1);
   }
 
   console.log("\n============================================================");

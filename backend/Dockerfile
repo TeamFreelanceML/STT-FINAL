@@ -11,7 +11,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir "pip<25" "setuptools<81" wheel
+RUN pip install --no-cache-dir "pip<25" "setuptools<81" wheel packaging
+RUN pip install --no-cache-dir --no-build-isolation openai-whisper==20231117
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
